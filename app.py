@@ -1,3 +1,4 @@
+import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
@@ -11,6 +12,7 @@ SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a
 REF_GREY = "#7a7975"
 CONTEXT_GREY = "#d6d5d0"
 NAVY = "#1F3A5F"
+MIN_TOWNS = 10
 
 
 @st.cache_data
@@ -77,10 +79,10 @@ with ctrl2:
     districts = st.multiselect(
         f"2. Drill into districts of {gov}",
         district_list,
-        default=district_list,
+        default=[d for d in district_list if counts[d] >= MIN_TOWNS] or district_list,
         key=f"districts_{gov}",
         format_func=lambda d: f"{d} ({counts[d]} towns)",
-        help="Only districts inside the chosen governorate are offered. Remove some to compare fewer.",
+        help="Only districts inside the chosen governorate are offered. Remove or add districts to compare.",
     )
 
 if not districts:
@@ -110,66 +112,129 @@ if len(dist_stats) > 1:
         f"({dist_stats.loc[bottom, 'Tertiary']:.1f}%): a gap of {gap:.1f} percentage points."
     )
 
-small = [d for d in districts if counts[d] < 10]
-if small:
-    st.caption(f"Caution: {', '.join(small)} has fewer than 10 towns with usable data, so its averages are fragile.")
+hidden = [d for d in district_list if d not in districts and counts[d] < MIN_TOWNS]
+if hidden:
+    verb = "starts" if len(hidden) == 1 else "start"
+    st.caption(f"{', '.join(hidden)} {verb} unselected because {'it has' if len(hidden) == 1 else 'they have'} fewer than {MIN_TOWNS} towns "
+               "with usable data, so the averages would be fragile. Add back in the box above if needed.")
 
-# ---------- chart 1: education profile ----------
+AXIS = dict(gridcolor="#eeeeec", zeroline=False, tickfont=dict(color="#52514e"), title_font=dict(color="#52514e"))
+LAYOUT = dict(plot_bgcolor="white", paper_bgcolor="white", font=dict(color="#0b0b0b"),
+              margin=dict(l=10, r=10, t=10, b=10), hoverlabel=dict(bgcolor="white"))
+
+# ---------- chart 1: ranked tertiary share ----------
+st.subheader("Which districts pull the average up or down?")
+st.caption("Share of residents with a university or higher degree, average of the district's towns. "
+           "The dashed line is the Lebanon average. Bar colors identify each district in the charts below.")
+
+order = dist_stats.sort_values("Tertiary").index.tolist()   # lowest at bottom
+fig0 = go.Figure(go.Bar(
+    y=order, x=dist_stats.loc[order, "Tertiary"], orientation="h",
+    marker=dict(color=[color_of[d] for d in order], line=dict(color="white", width=2)),
+    text=[f"{v:.0f}%" for v in dist_stats.loc[order, "Tertiary"]], textposition="outside",
+    textfont=dict(color="#0b0b0b"),
+    customdata=[counts[d] for d in order],
+    hovertemplate="%{y}: %{x:.1f}% tertiary<br>%{customdata} towns<extra></extra>",
+))
+fig0.add_vline(x=national["Tertiary"], line=dict(color=REF_GREY, dash="dash", width=1.5),
+               annotation_text=f"Lebanon {national['Tertiary']:.0f}%", annotation_position="top",
+               annotation_font_color=REF_GREY)
+fig0.update_layout(**{**LAYOUT, "margin": dict(l=10, r=10, t=30, b=10)}, height=110 + 42 * len(order), showlegend=False, bargap=0.35,
+                   xaxis=dict(**AXIS, ticksuffix="%", range=[0, max(45, dist_stats["Tertiary"].max() + 6)]),
+                   yaxis=dict(**AXIS, title=None))
+st.plotly_chart(fig0, use_container_width=True)
+
+# ---------- chart 2: education profile ----------
 st.subheader("Education profile: where do residents stop?")
-st.caption("Average share of residents at each level, per district. Dashed grey line is the Lebanon average.")
+st.caption("Each line follows one district from lowest to highest level. A line above the dashed grey "
+           "Lebanon average means more residents stopped at that level. Hover any level to compare all "
+           "districts at once.")
 
 fig1 = go.Figure()
 fig1.add_trace(go.Scatter(
     x=LEVEL_ORDER, y=national[LEVEL_ORDER].values, name="Lebanon average",
-    mode="lines", line=dict(color=REF_GREY, width=2, dash="dash"),
-    hovertemplate="Lebanon average<br>%{x}: %{y:.1f}%<extra></extra>",
+    mode="lines", line=dict(color=REF_GREY, width=3, dash="dash"),
+    hovertemplate="%{y:.1f}%",
 ))
-for d in dist_stats.index:
+for d in dist_stats.index:   # legend and hover list run from highest to lowest tertiary share
     prof = sel[sel["District"] == d][LEVEL_ORDER].mean()
     fig1.add_trace(go.Scatter(
         x=LEVEL_ORDER, y=prof.values, name=d, mode="lines+markers",
         line=dict(color=color_of[d], width=2), marker=dict(size=8, line=dict(color="white", width=2)),
-        hovertemplate=f"{d}<br>%{{x}}: %{{y:.1f}}%<extra></extra>",
+        hovertemplate="%{y:.1f}%",
     ))
-fig1.update_layout(
-    height=430, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white", hovermode="closest",
-    yaxis=dict(title="% of residents", ticksuffix="%", gridcolor="#eeeeec", zeroline=False),
-    xaxis=dict(title=None, showgrid=False),
-    legend=dict(orientation="h", y=-0.15, x=0),
-)
+fig1.add_vrect(x0=4.5, x1=6.5, fillcolor="#eef2f8", line_width=0, layer="below",
+               annotation_text="Tertiary", annotation_position="top left",
+               annotation_font_color=NAVY)
+fig1.update_layout(**LAYOUT, height=440, hovermode="x unified",
+                   yaxis=dict(**AXIS, title="% of residents", ticksuffix="%", rangemode="tozero"),
+                   xaxis=dict(**AXIS, title=None, showgrid=False),
+                   legend=dict(orientation="h", y=-0.12, x=0, font=dict(color="#0b0b0b")))
 st.plotly_chart(fig1, use_container_width=True)
 
-# ---------- chart 2: town scatter ----------
-st.subheader("Town by town: illiteracy against tertiary education")
-st.caption("Each dot is a town. Grey dots are every other town in Lebanon, kept for context. "
-           "Hover a dot for the town name. Towns reported rounded values (0, 1, 2, 5, 10%...), so dots stack in columns.")
+# ---------- chart 3: town scatter ----------
+st.subheader("Town by town: does more illiteracy mean fewer graduates?")
+
+X_CAP = 30
+rng = np.random.default_rng(7)
+
+
+def plot_x(s):
+    # squeeze the long tail: every town above the cap sits in one '30%+' column
+    x = s["Illiterate"].clip(upper=X_CAP + 2).where(s["Illiterate"] <= X_CAP, X_CAP + 2)
+    return x + rng.uniform(-0.35, 0.35, len(s))
+
+
+def plot_y(s):
+    return s["Tertiary"] + rng.uniform(-0.8, 0.8, len(s))
+
+
+def trend(s):
+    slope, icpt = np.polyfit(s["Illiterate"], s["Tertiary"], 1)
+    xs = np.array([0, X_CAP])
+    return xs, icpt + slope * xs, slope
+
+
+r_sel = sel[["Illiterate", "Tertiary"]].corr().iloc[0, 1] if len(sel) > 2 else float("nan")
+nx, ny, nslope = trend(df)
+sx, sy, sslope = trend(sel) if len(sel) > 2 else (None, None, None)
+st.caption(
+    f"Each dot is a town; grey dots are the rest of Lebanon. Lines show the average trend. Nationally, "
+    f"every 10 extra points of illiteracy go with about {abs(nslope) * 10:.0f} fewer points of tertiary "
+    f"education (r = {df[['Illiterate', 'Tertiary']].corr().iloc[0, 1]:.2f}). In your selection, "
+    f"r = {r_sel:.2f}. Towns above {X_CAP}% illiteracy are grouped in the last column, and dots are "
+    f"nudged slightly apart because towns reported rounded values; hover shows the true figures."
+)
 
 rest = df[~df.index.isin(sel.index)]
 fig2 = go.Figure()
 fig2.add_trace(go.Scatter(
-    x=rest["Illiterate"], y=rest["Tertiary"], mode="markers", name="Rest of Lebanon",
-    marker=dict(color=CONTEXT_GREY, size=7), text=rest["Town"] + " (" + rest["District"] + ")",
-    hovertemplate="%{text}<br>Illiterate: %{x:.1f}%<br>Tertiary: %{y:.1f}%<extra></extra>",
+    x=plot_x(rest), y=plot_y(rest), mode="markers", name="Rest of Lebanon",
+    marker=dict(color=CONTEXT_GREY, size=7),
+    customdata=np.stack([rest["Town"] + " (" + rest["District"] + ")", rest["Illiterate"], rest["Tertiary"]], axis=-1),
+    hovertemplate="%{customdata[0]}<br>Illiterate: %{customdata[1]:.1f}%<br>Tertiary: %{customdata[2]:.1f}%<extra></extra>",
 ))
 for d in dist_stats.index:
     s = sel[sel["District"] == d]
     fig2.add_trace(go.Scatter(
-        x=s["Illiterate"], y=s["Tertiary"], mode="markers", name=d,
-        marker=dict(color=color_of[d], size=9, opacity=0.85, line=dict(color="white", width=1.5)),
-        text=s["Town"],
-        hovertemplate=f"%{{text}} ({d})<br>Illiterate: %{{x:.1f}}%<br>Tertiary: %{{y:.1f}}%<extra></extra>",
+        x=plot_x(s), y=plot_y(s), mode="markers", name=d,
+        marker=dict(color=color_of[d], size=9, opacity=0.9, line=dict(color="white", width=1.5)),
+        customdata=np.stack([s["Town"], s["Illiterate"], s["Tertiary"]], axis=-1),
+        hovertemplate=f"%{{customdata[0]}} ({d})<br>Illiterate: %{{customdata[1]:.1f}}%<br>Tertiary: %{{customdata[2]:.1f}}%<extra></extra>",
     ))
-fig2.add_hline(y=national["Tertiary"], line=dict(color=REF_GREY, dash="dash", width=1),
-               annotation_text="Lebanon avg tertiary", annotation_position="top right",
-               annotation_font_color=REF_GREY)
-fig2.add_vline(x=national["Illiterate"], line=dict(color=REF_GREY, dash="dash", width=1),
-               annotation_text="Lebanon avg illiterate", annotation_position="top right",
-               annotation_font_color=REF_GREY)
+fig2.add_trace(go.Scatter(x=nx, y=ny, mode="lines", name="Lebanon trend",
+                          line=dict(color=REF_GREY, width=2, dash="dash"), hoverinfo="skip"))
+if sx is not None:
+    fig2.add_trace(go.Scatter(x=sx, y=sy, mode="lines", name="Selection trend",
+                              line=dict(color=NAVY, width=3), hoverinfo="skip"))
+fig2.add_vrect(x0=X_CAP + 0.8, x1=X_CAP + 3.2, fillcolor="#f4f4f2", line_width=0, layer="below")
 fig2.update_layout(
-    height=480, margin=dict(l=10, r=10, t=10, b=10), plot_bgcolor="white",
-    xaxis=dict(title="Illiterate residents (%)", ticksuffix="%", gridcolor="#eeeeec", zeroline=False),
-    yaxis=dict(title="University + higher education (%)", ticksuffix="%", gridcolor="#eeeeec", zeroline=False),
-    legend=dict(orientation="h", y=-0.18, x=0),
+    **LAYOUT, height=500,
+    xaxis=dict(**AXIS, title="Illiterate residents (%)", range=[-1, X_CAP + 3.5],
+               tickvals=[0, 5, 10, 15, 20, 25, 30, X_CAP + 2],
+               ticktext=["0%", "5%", "10%", "15%", "20%", "25%", "30%", "30%+"]),
+    yaxis=dict(**AXIS, title="University + higher education (%)", ticksuffix="%", range=[-3, 103]),
+    legend=dict(orientation="h", y=-0.18, x=0, font=dict(color="#0b0b0b")),
 )
 st.plotly_chart(fig2, use_container_width=True)
 
@@ -205,10 +270,10 @@ with st.expander("Feature 2: district multiselect (linked to feature 1)", expand
         "was chosen over a single dropdown because the question is comparative: users need two or more "
         "districts side by side. Checkboxes were considered, but with up to six districts they push the "
         "charts below the fold, while the multiselect stays compact and shows town counts next to each "
-        "name so thin samples are visible before selection.\n\n"
+        "name so thin samples are visible; districts with fewer than 10 towns start unselected.\n\n"
         "**Course concept.** It focuses attention through highlighting: selected districts are drawn in "
         "color while every other town in Lebanon stays as light grey dots, and the dashed Lebanon average "
-        "stays on both charts. That keeps context visible while directing the eye to the comparison the "
+        "stays on every chart. That keeps context visible while directing the eye to the comparison the "
         "user asked for. Each district keeps the same color when others are removed, so the encoding "
         "stays consistent."
     )
